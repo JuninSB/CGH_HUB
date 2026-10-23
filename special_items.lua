@@ -1,3 +1,4 @@
+--[[ Default Colors Table ]]
 local colors = {
     red = Color3.fromRGB(255,0,0),
     green = Color3.fromRGB(0,255,0),
@@ -8,15 +9,14 @@ local colors = {
     orange = Color3.fromRGB(255, 153, 28),
     blue1 = Color3.fromRGB(73, 195, 214),
 }
-
+--[[ Special items tables with their names and properties (default color and if they notify by default) ]]
 local special_items = {
-    ["AirHorn"] = colors.yellow,
-    ["Bandage"] = colors.yellow,
-    ["HealthKit"] = colors.red,
-    ["Tape"] = colors.darkBlue,
-    ["ResearchCapsule"] = colors.darkBlue,
-    ["Pumpkin"] = colors.orange,
-    ["PopBottle"] = colors.blue1
+    ["AirHorn"] = {colors.yellow, false},
+    ["Bandage"] = {colors.yellow, true},
+    ["HealthKit"] = {colors.red, true},
+    ["Tape"] = {colors.darkBlue, false},
+    ["ResearchCapsule"] = {colors.darkBlue, false},
+    ["Pumpkin"] = {colors.orange, false},
+    ["PopBottle"] = {colors.blue1, false},
 }
-
 return special_items,colors
