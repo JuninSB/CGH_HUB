@@ -1,3 +1,5 @@
+-- // THIS IS THE DEFAULT SPECIAL ITEMS DATABASE, YOU CAN MODIFY THE SOURCE AND MAKE YOUR OWN DATABASE IF YOU WANT!
+
 --[[ Default Colors Table ]]
 local colors = {
     red = Color3.fromRGB(255,0,0),
