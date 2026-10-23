@@ -16,22 +16,78 @@ local colors = {
     yellow = Color3.fromRGB(255,255,0),
     white = Color3.fromRGB(255,255,255),
     darkBlue = Color3.fromRGB(0, 0, 96),
-    orange = Color3.fromRGB(255, 153, 28)
+    orange = Color3.fromRGB(255, 153, 28),
+    blue1 = Color3.fromRGB(73, 195, 214)
 }
+
+local ESPBoxesEnabled = true
+local ESPDisplayMode = "Tudo"
 
 local espColors = {
     Monster = Color3.fromRGB(252, 83, 83),
     Generator = Color3.fromRGB(0, 252, 83),
 }
 
+local SPECIAL_ITEMS_URL = "https://raw.githubusercontent.com/JuninSB/CGH_HUB/refs/heads/main/special_items.lua"
 local special_items = {
-    ["AirHorn"] = colors.yellow,
-    ["Bandage"] = colors.yellow,
-    ["HealthKit"] = colors.red,
-    ["Tape"] = colors.darkBlue,
-    ["ResearchCapsule"] = colors.darkBlue,
-    ["Pumpkin"] = colors.orange
+    ["AirHorn"] = {color = colors.yellow, notify = false},
+    ["Bandage"] = {color = colors.yellow, notify = true},
+    ["HealthKit"] = {color = colors.red, notify = true},
+    ["Tape"] = {color = colors.darkBlue, notify = false},
+    ["ResearchCapsule"] = {color = colors.darkBlue, notify = false},
+    ["Pumpkin"] = {color = colors.orange, notify = false},
+    ["PopBottle"] = {color = colors.blue1, notify = false},
 }
+
+local function loadSpecialItemsFromCloud()
+    local ok, remoteItems, remoteColors = pcall(function()
+        local source = game:HttpGet(SPECIAL_ITEMS_URL)
+        local chunk, compileError = loadstring(source)
+        assert(type(chunk) == "function", tostring(compileError))
+        return chunk()
+    end)
+    if not ok or type(remoteItems) ~= "table" then
+        warn("[CGH] Nao foi possivel carregar special_items.lua; usando lista local: " .. tostring(remoteItems))
+        return
+    end
+
+    local validated = {}
+    for itemName, properties in pairs(remoteItems) do
+        if type(itemName) == "string" and type(properties) == "table" and typeof(properties[1]) == "Color3" then
+            validated[itemName] = {color = properties[1], notify = properties[2] == true}
+        else
+            warn("[CGH] Entrada invalida em special_items.lua: " .. tostring(itemName))
+        end
+    end
+    if next(validated) == nil then
+        warn("[CGH] special_items.lua nao tinha entradas validas; usando lista local")
+        return
+    end
+
+    if type(remoteColors) == "table" then
+        for colorName, colorValue in pairs(remoteColors) do
+            if type(colorName) == "string" and typeof(colorValue) == "Color3" then
+                colors[colorName] = colorValue
+            end
+        end
+    end
+    table.clear(special_items)
+    for itemName, properties in pairs(validated) do
+        special_items[itemName] = properties
+    end
+    local itemCount = 0
+    for _ in pairs(special_items) do itemCount = itemCount + 1 end
+    print("[CGH] Itens especiais carregados da nuvem: " .. tostring(itemCount))
+end
+
+loadSpecialItemsFromCloud()
+
+local function getSpecialItemNames()
+    local names = {}
+    for itemName in pairs(special_items) do table.insert(names, itemName) end
+    table.sort(names)
+    return names
+end
 local player = Players.LocalPlayer
 local objects = {}
 local connection
@@ -300,7 +356,7 @@ local function updateESP(esp, camera)
     drawings.Box.Thickness = config.BoxThickness
     drawings.Box.Filled = config.Filled
     drawings.Box.Transparency = config.Filled and config.FilledTransparency or config.Transparency
-    drawings.Box.Visible = config.Box and config.BoxType == "Square"
+    drawings.Box.Visible = ESPBoxesEnabled and config.Box and config.BoxType == "Square"
 
     drawings.Quad.PointA = Vector2.new(boxX, boxY)
     drawings.Quad.PointB = Vector2.new(boxX + boxW, boxY)
@@ -310,7 +366,7 @@ local function updateESP(esp, camera)
     drawings.Quad.Thickness = config.BoxThickness
     drawings.Quad.Filled = config.Filled
     drawings.Quad.Transparency = config.Filled and config.FilledTransparency or config.Transparency
-    drawings.Quad.Visible = config.Box and config.BoxType == "Quad"
+    drawings.Quad.Visible = ESPBoxesEnabled and config.Box and config.BoxType == "Quad"
 
     drawings.Text.Text = config.Name or target.Name
     drawings.Text.Position = Vector2.new(boxX + boxW / 2, boxY - config.Size - 2)
@@ -462,6 +518,11 @@ function ESPService.Create(part, name, config)
         for _, drawing in pairs(self.Drawings) do
             drawing:Remove()
         end
+        if next(objects) == nil and connection then
+            connection:Disconnect()
+            connection = nil
+            running = false
+        end
     end
 
     objects[esp] = true
@@ -571,9 +632,25 @@ local bkfogend = light.FogEnd
 local bkfogstart = light.FogStart
 local bkoutdooramb = light.OutdoorAmbient
 
-local fbloop_delay = 1
 local fbenabled = false
-local fbloop = true
+
+local function applyFullbright(enabled)
+    if enabled then
+        light.Brightness = 3
+        light.GlobalShadows = false
+        light.ClockTime = 12
+        light.FogEnd = 1000
+        light.FogStart = 800
+        light.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
+    else
+        light.Brightness = bkbright
+        light.GlobalShadows = bkglobalshadow
+        light.ClockTime = bkclocktime
+        light.FogEnd = bkfogend
+        light.FogStart = bkfogstart
+        light.OutdoorAmbient = bkoutdooramb
+    end
+end
 
 local noclipenabled = false
 
@@ -699,6 +776,8 @@ local function clearOldNoclipStorage(activeRoom)
     end
 end
 
+local scheduleNoclipRoomApply
+
 local function applyNoclipToRoom(room)
     if not noclipenabled or not room or not room:IsA("Model") then return end
     local readyAt = noclipRoomReadyAt[room]
@@ -706,7 +785,7 @@ local function applyNoclipToRoom(room)
     clearOldNoclipStorage(room)
 
     local state = noclipRoomStates[room] or {parts = {}, moved = {}, container = nil}
-    local names = {NoClip_Collider = true, NoClip = true}
+    local names = {NoClip_Collider = true, NoClip = true, CylinderCollider = true}
     local targetSet, partSet = {}, {}
     for _, target in ipairs(state.targets or {}) do targetSet[target] = true end
     for _, record in ipairs(state.parts) do if record.instance then partSet[record.instance] = true end end
@@ -737,7 +816,12 @@ local function applyNoclipToRoom(room)
     for target in pairs(targetSet) do table.insert(state.targets, target) end
     for part in pairs(partSet) do
         local exists = false
-        for _, record in ipairs(state.parts) do if record.instance == part then exists = true break end end
+        for _, record in ipairs(state.parts) do
+            if record.instance == part then
+                exists = true
+                break
+            end
+        end
         if not exists then table.insert(state.parts, {instance = part, canCollide = part.CanCollide}) end
         part.CanCollide = false
     end
@@ -772,7 +856,12 @@ local function applyNoclipToRoom(room)
         for _, target in ipairs(state.targets) do
             if target:IsA("BasePart") then
                 local exists = false
-                for _, record in ipairs(state.parts) do if record.instance == target then exists = true break end end
+                for _, record in ipairs(state.parts) do
+                    if record.instance == target then
+                        exists = true
+                        break
+                    end
+                end
                 if not exists then table.insert(state.parts, {instance = target, canCollide = target.CanCollide}) end
                 target.CanCollide = false
             end
@@ -782,8 +871,8 @@ local function applyNoclipToRoom(room)
     noclipRoomStates[room] = state
     noclipCompletedRooms[room] = true
     if not noclipRoomConnections[room] then
-        noclipRoomConnections[room] = room.DescendantAdded:Connect(function(descendant)
-            if noclipenabled then task.defer(applyNoclipToRoom, room) end
+        noclipRoomConnections[room] = room.DescendantAdded:Connect(function()
+            if noclipenabled and scheduleNoclipRoomApply then scheduleNoclipRoomApply(room) end
         end)
     end
     local staleParts = {}
@@ -792,6 +881,16 @@ local function applyNoclipToRoom(room)
     end
     for index = #staleParts, 1, -1 do table.remove(state.parts, staleParts[index]) end
     CS:AddTag(room, "CGH_NoCliped")
+end
+
+local pendingNoclipRoomApplies = setmetatable({}, {__mode = "k"})
+scheduleNoclipRoomApply = function(room)
+    if pendingNoclipRoomApplies[room] then return end
+    pendingNoclipRoomApplies[room] = true
+    task.delay(0.1, function()
+        pendingNoclipRoomApplies[room] = nil
+        if noclipenabled and room.Parent then applyNoclipToRoom(room) end
+    end)
 end
 
 local function watchNoclipRoomFolder(folder)
@@ -811,7 +910,10 @@ local function watchNoclipRoomFolder(folder)
     noclipRoomFolderRemovalConnection = folder.ChildRemoved:Connect(function(room)
         if room:IsA("Model") then
             local connection = noclipRoomConnections[room]
-            if connection then connection:Disconnect() noclipRoomConnections[room] = nil end
+            if connection then
+                connection:Disconnect()
+                noclipRoomConnections[room] = nil
+            end
             noclipRoomReadyAt[room] = nil
             if noclipRoomStates[room] then restoreRoomNoclip(room) end
         end
@@ -829,40 +931,24 @@ local function watchNoclipRoomFolder(folder)
 end
 
 watchNoclipRoomFolder(workspace:FindFirstChild("CurrentRoom"))
-noclipconnex = run.Heartbeat:Connect(function()
-    if not noclipenabled then return end
-    local folder = workspace:FindFirstChild("CurrentRoom")
-    local room = folder and folder:FindFirstChildOfClass("Model")
-    if room and not noclipCompletedRooms[room] then applyNoclipToRoom(room) end
-end)
-local fullbrightThread = task.spawn(function()
-    while fbloop do
-        if fbenabled then
-            light.Brightness = 3
-            light.GlobalShadows = false
-            light.ClockTime = 12
-            --light.ExposureCompensation = 1
-            light.FogEnd = 1000
-            light.FogStart = 800
-            light.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
-        else
-            light.Brightness = bkbright
-            light.GlobalShadows = bkglobalshadow
-            light.ClockTime = bkclocktime
-            --light.ExposureCompensation = bkexposurecomp
-            light.FogEnd = bkfogend
-            light.FogStart = bkfogstart
-            light.OutdoorAmbient = bkoutdooramb
-        end
-        task.wait(fbloop_delay)
-    end
-end)
 
 local function stopNoclipWatch()
-    if noclipconnex then noclipconnex:Disconnect() noclipconnex = nil end
-    if noclipRoomConnection then noclipRoomConnection:Disconnect() noclipRoomConnection = nil end
-    if noclipRoomFolderRemovalConnection then noclipRoomFolderRemovalConnection:Disconnect() noclipRoomFolderRemovalConnection = nil end
-    if noclipFolderConnection then noclipFolderConnection:Disconnect() noclipFolderConnection = nil end
+    if noclipconnex then
+        noclipconnex:Disconnect()
+        noclipconnex = nil
+    end
+    if noclipRoomConnection then
+        noclipRoomConnection:Disconnect()
+        noclipRoomConnection = nil
+    end
+    if noclipRoomFolderRemovalConnection then
+        noclipRoomFolderRemovalConnection:Disconnect()
+        noclipRoomFolderRemovalConnection = nil
+    end
+    if noclipFolderConnection then
+        noclipFolderConnection:Disconnect()
+        noclipFolderConnection = nil
+    end
     for room, connection in pairs(noclipRoomConnections) do
         connection:Disconnect()
         noclipRoomConnections[room] = nil
@@ -875,6 +961,7 @@ local VisualWatch = {
     roomConnections = {},
     mapConnections = {},
     contentConnections = {},
+    workspaceConnections = {},
     records = {},
     scanId = 0,
 }
@@ -904,6 +991,14 @@ local function clearVisualMap()
     VisualWatch.map = nil
 end
 
+local function shouldRenderDrawing(kind, instance)
+    if ESPDisplayMode == "Nada" then return false end
+    if ESPDisplayMode == "Semi" then
+        return kind == "item" and special_items[instance.Name] ~= nil
+    end
+    return true
+end
+
 local function applyVisualESP(instance, kind)
     if not instance or not instance.Parent then return end
     local enabled = kind == "monster" and MonsESP or kind == "generator" and GenESP or kind == "item" and ItemsESP
@@ -913,7 +1008,8 @@ local function applyVisualESP(instance, kind)
     if kind ~= "item" and not isModel then return end
 
     local color = kind == "monster" and espColors.Monster or espColors.Generator
-    if kind == "item" then color = special_items[instance.Name] or colors.white end
+    local itemSettings = kind == "item" and special_items[instance.Name] or nil
+    if kind == "item" then color = itemSettings and itemSettings.color or colors.white end
     local whiteItemOutline = kind == "item" and (instance.Name == "Tape" or instance.Name == "ResearchCapsule")
     local outlineColor = whiteItemOutline and colors.white or Color3.fromRGB(0, 0, 0)
     local record = VisualWatch.records[instance]
@@ -931,16 +1027,18 @@ local function applyVisualESP(instance, kind)
     highlight.OutlineTransparency = 0
 
     ESPService.RemoveFromPart(instance)
-    ESPService.Create(instance, instance.Name, {
-        Color = color,
-        TextColor = color,
-        BoxColor = outlineColor,
-        OutlineColor = outlineColor,
-        Size = kind == "item" and 15 or 16,
-        Outline = true,
-        Box = kind ~= "item" and kind == "monster",
-        ShowDistance = false,
-    })
+    if shouldRenderDrawing(kind, instance) then
+        ESPService.Create(instance, instance.Name, {
+            Color = color,
+            TextColor = color,
+            BoxColor = outlineColor,
+            OutlineColor = outlineColor,
+            Size = kind == "item" and 15 or 16,
+            Outline = true,
+            Box = kind ~= "item" and kind == "monster",
+            ShowDistance = false,
+        })
+    end
 
     if not VisualWatch.records[instance] then
         local record = {kind = kind, connections = {}}
@@ -956,12 +1054,12 @@ local function applyVisualESP(instance, kind)
         end))
     end
 
-    if kind == "item" and (instance.Name == "Bandage" or instance.Name == "HealthKit") then
+    if kind == "item" and itemSettings and itemSettings.notify then
         local notified = VisualWatch.records[instance].notified
         if not notified then
             VisualWatch.records[instance].notified = true
             WindUI:Notify({
-                Title = instance.Name == "Bandage" and "Bandage encontrado" or "HealthKit encontrado",
+                Title = instance.Name .. " encontrado",
                 Content = "Item encontrado: " .. instance.Name,
                 Icon = "package-check",
                 Duration = 5,
@@ -1080,17 +1178,36 @@ local function bindVisualRoom(folder)
     schedule(9)
 end
 
-table.insert(VisualWatch.roomConnections, workspace.ChildAdded:Connect(function(child)
+table.insert(VisualWatch.workspaceConnections, workspace.ChildAdded:Connect(function(child)
     if child.Name == "CurrentRoom" and child:IsA("Folder") then bindVisualRoom(child) end
 end))
-table.insert(VisualWatch.roomConnections, workspace.ChildRemoved:Connect(function(child)
+table.insert(VisualWatch.workspaceConnections, workspace.ChildRemoved:Connect(function(child)
     if child == VisualWatch.roomFolder then bindVisualRoom(nil) end
 end))
 bindVisualRoom(workspace:FindFirstChild("CurrentRoom"))
 
+local function setESPDisplayMode(mode)
+    if mode ~= "Tudo" and mode ~= "Semi" and mode ~= "Nada" then return end
+    ESPDisplayMode = mode
+    for instance, record in pairs(VisualWatch.records) do
+        applyVisualESP(instance, record.kind)
+    end
+end
+
+local function setESPBoxesEnabled(enabled)
+    ESPBoxesEnabled = enabled
+    for esp in pairs(objects) do
+        if not enabled then
+            esp.Drawings.Box.Visible = false
+            esp.Drawings.Quad.Visible = false
+        end
+    end
+end
+
 local function stopVisualWatch()
     VisualWatch.scanId += 1
     disconnectVisualConnections(VisualWatch.roomConnections)
+    disconnectVisualConnections(VisualWatch.workspaceConnections)
     clearVisualMap()
     VisualWatch.roomFolder = nil
     MonsESP = false
@@ -1104,7 +1221,7 @@ local anony_ = false
 local gui
 gui = WindUI:CreateWindow({
     Title = "Conguitos Hub", 
-    Icon = "panda", 
+    Icon = "https://raw.githubusercontent.com/JuninSB/CGH_HUB/refs/heads/main/icon.jpg", 
     Author = "by Mike and Tinhopro",
     Folder = "ConguitosHub",
     Theme = "Dark",
@@ -1141,28 +1258,64 @@ local sessionStartedAt = os.clock()
 local fpsFrames = 0
 local fpsValue = 0
 local lastFPSUpdate = sessionStartedAt
-local lastTagUpdate = 0
-local fpsTag = gui:Tag({Title = "FPS: 0", Icon = "lucide:gauge", Color = Color3.fromRGB(80, 180, 255)})
-local playtimeTag = gui:Tag({Title = "00:00:00:00", Icon = "lucide:clock-3", Color = Color3.fromRGB(170, 120, 255)})
-local statusTagConnection = RunService.RenderStepped:Connect(function()
-    fpsFrames += 1
-    local now = os.clock()
-    local fpsElapsed = now - lastFPSUpdate
-    if fpsElapsed >= 1 then
-        fpsValue = math.floor(fpsFrames / fpsElapsed + 0.5)
-        fpsFrames = 0
-        lastFPSUpdate = now
+local fpsTag
+local playtimeTag
+local fpsTagConnection
+local playtimeTagTimerId = 0
+local function setFPSTagVisible(visible)
+    if fpsTagConnection then
+        fpsTagConnection:Disconnect()
+        fpsTagConnection = nil
     end
-    if now - lastTagUpdate < 0.1 then return end
-    lastTagUpdate = now
-    local elapsed = now - sessionStartedAt
-    local hours = math.floor(elapsed / 3600)
-    local minutes = math.floor(elapsed / 60) % 60
-    local seconds = math.floor(elapsed) % 60
-    local centiseconds = math.floor((elapsed % 1) * 100)
-    pcall(function() fpsTag:SetTitle("FPS: " .. tostring(fpsValue)) end)
-    pcall(function() playtimeTag:SetTitle(string.format("%02d:%02d:%02d:%02d", hours, minutes, seconds, centiseconds)) end)
-end)
+    if fpsTag then
+        pcall(function() fpsTag:Destroy() end)
+        fpsTag = nil
+    end
+    if not visible then return end
+    fpsTag = gui:Tag({Title = "FPS: 0", Icon = "gauge", Color = Color3.fromRGB(80, 180, 255)})
+    fpsFrames = 0
+    lastFPSUpdate = os.clock()
+    fpsTagConnection = RunService.RenderStepped:Connect(function()
+        fpsFrames += 1
+        local now = os.clock()
+        local elapsed = now - lastFPSUpdate
+        if elapsed >= 1 then
+            fpsValue = math.floor(fpsFrames / elapsed + 0.5)
+            fpsFrames = 0
+            lastFPSUpdate = now
+            if fpsTag then pcall(function() fpsTag:SetTitle("FPS: " .. tostring(fpsValue)) end) end
+        end
+    end)
+end
+
+local function setPlaytimeTagVisible(visible)
+    playtimeTagTimerId += 1
+    if playtimeTag then
+        pcall(function() playtimeTag:Destroy() end)
+        playtimeTag = nil
+    end
+    if not visible then return end
+    playtimeTag = gui:Tag({Title = "00:00:00:00", Icon = "clock-3", Color = Color3.fromRGB(170, 120, 255)})
+    local timerId = playtimeTagTimerId
+    local function updatePlaytime()
+        if timerId ~= playtimeTagTimerId or not playtimeTag then return end
+        local elapsed = os.clock() - sessionStartedAt
+        local hours = math.floor(elapsed / 3600)
+        local minutes = math.floor(elapsed / 60) % 60
+        local seconds = math.floor(elapsed) % 60
+        local centiseconds = math.floor((elapsed % 1) * 100)
+        pcall(function() playtimeTag:SetTitle(string.format("%02d:%02d:%02d:%02d", hours, minutes, seconds, centiseconds)) end)
+        task.delay(0.1, updatePlaytime)
+    end
+    task.defer(updatePlaytime)
+end
+
+local function setStatusTagsEnabled(enabled)
+    setFPSTagVisible(enabled)
+    setPlaytimeTagVisible(enabled)
+end
+
+setStatusTagsEnabled(true)
 
 local autoQTEEnabled = false
 local replicatedStorage = game:GetService("ReplicatedStorage")
@@ -1225,8 +1378,14 @@ local NextGeneratorEnabled = false
 local AutoHideConnections = {}
 local AntiMissclickEnabled = false
 local AntiMissclickBeingChased = false
+local AntiMissclickEventChased = false
 local AntiMissclickConnections = {}
+local AntiMissclickMonsterConnections = {}
+local AntiMissclickMonsterRecords = {}
 local AntiMissclickStoppedGenerators = {}
+local playerNameFromValue
+local valueDescription
+local getCharacterRoot
 local autoHideSavedCFrame
 local autoHideActive = false
 local autoHideLoopId = 0
@@ -1256,15 +1415,132 @@ local function disconnectConnections(connections)
     table.clear(connections)
 end
 
+local function updateAntiMissclickChaseState()
+    local chased = false
+    for monster, record in pairs(AntiMissclickMonsterRecords) do
+        if monster.Parent and record.chasing and record.chasing:IsA("BoolValue") and record.chasingValue and record.chasingValue:IsA("ValueBase") then
+            if record.chasing.Value and playerNameFromValue(record.chasingValue.Value) == localplayer.Name then
+                chased = true
+                break
+            end
+        end
+    end
+    chased = chased or AntiMissclickEventChased
+    if chased ~= AntiMissclickBeingChased then
+        AntiMissclickBeingChased = chased
+        table.clear(AntiMissclickStoppedGenerators)
+        print("[Anti Missclick] Monster chase state from Chasing values | beingChased=" .. tostring(chased))
+    end
+end
+
+local function monitorAntiMissclickMonster(monster)
+    if not monster:IsA("Model") or AntiMissclickMonsterRecords[monster] then return end
+    local record = {connections = {}, chasing = nil, chasingValue = nil, chasingConnection = nil, chasingValueConnection = nil}
+    AntiMissclickMonsterRecords[monster] = record
+
+    local function reportChaseValueChange(changedName)
+        local rawTarget = record.chasingValue and record.chasingValue.Value or nil
+        local targetName = rawTarget ~= nil and playerNameFromValue(rawTarget) or "nil"
+        print("[Anti Missclick] Chase value changed | monster=" .. monster:GetFullName() .. " | changed=" .. changedName .. " | Chasing=" .. tostring(record.chasing and record.chasing.Value) .. " | ChasingValue=" .. valueDescription(rawTarget) .. " | resolvedTarget=" .. tostring(targetName) .. " | localPlayer=" .. tostring(targetName == localplayer.Name))
+        updateAntiMissclickChaseState()
+    end
+
+    local function configure()
+        local chasing = monster:FindFirstChild("Chasing", true)
+        local chasingValue = monster:FindFirstChild("ChasingValue", true)
+        if chasing ~= record.chasing then
+            if record.chasingConnection then
+                record.chasingConnection:Disconnect()
+                record.chasingConnection = nil
+            end
+            record.chasing = chasing and chasing:IsA("BoolValue") and chasing or nil
+            if record.chasing then
+                record.chasingConnection = record.chasing:GetPropertyChangedSignal("Value"):Connect(function()
+                    reportChaseValueChange("Chasing")
+                end)
+            end
+        end
+        if chasingValue ~= record.chasingValue then
+            if record.chasingValueConnection then
+                record.chasingValueConnection:Disconnect()
+                record.chasingValueConnection = nil
+            end
+            record.chasingValue = chasingValue and chasingValue:IsA("ValueBase") and chasingValue or nil
+            if record.chasingValue then
+                record.chasingValueConnection = record.chasingValue:GetPropertyChangedSignal("Value"):Connect(function()
+                    reportChaseValueChange("ChasingValue")
+                end)
+            end
+        end
+        if record.chasing and record.chasingValue then
+            local targetName = playerNameFromValue(record.chasingValue.Value)
+            print("[Anti Missclick] Monitoring monster chase values | monster=" .. monster:GetFullName() .. " | Chasing=" .. tostring(record.chasing.Value) .. " | ChasingValue=" .. valueDescription(record.chasingValue.Value) .. " | resolvedTarget=" .. tostring(targetName) .. " | localPlayer=" .. tostring(targetName == localplayer.Name))
+        else
+            print("[Anti Missclick] Monster chase values missing/invalid | monster=" .. monster:GetFullName() .. " | Chasing=" .. tostring(chasing and chasing.ClassName) .. " | ChasingValue=" .. tostring(chasingValue and chasingValue.ClassName))
+        end
+        updateAntiMissclickChaseState()
+    end
+
+    table.insert(record.connections, monster.DescendantAdded:Connect(function(descendant)
+        if descendant.Name == "Chasing" or descendant.Name == "ChasingValue" then task.defer(configure) end
+    end))
+    table.insert(record.connections, monster.DescendantRemoving:Connect(function(descendant)
+        if descendant == record.chasing or descendant == record.chasingValue then task.defer(configure) end
+    end))
+    table.insert(AntiMissclickMonsterConnections, monster.AncestryChanged:Connect(function(_, parent)
+        if parent == nil then
+            disconnectConnections(record.connections)
+            if record.chasingConnection then record.chasingConnection:Disconnect() end
+            if record.chasingValueConnection then record.chasingValueConnection:Disconnect() end
+            AntiMissclickMonsterRecords[monster] = nil
+            updateAntiMissclickChaseState()
+        end
+    end))
+    configure()
+end
+
+local function bindAntiMissclickMonsters(map)
+    disconnectConnections(AntiMissclickMonsterConnections)
+    for monster, record in pairs(AntiMissclickMonsterRecords) do
+        disconnectConnections(record.connections)
+        if record.chasingConnection then record.chasingConnection:Disconnect() end
+        if record.chasingValueConnection then record.chasingValueConnection:Disconnect() end
+        AntiMissclickMonsterRecords[monster] = nil
+    end
+    local monsters = map and map:FindFirstChild("Monsters")
+    if not monsters then
+        AntiMissclickBeingChased = false
+        print("[Anti Missclick] Monsters folder missing for current map")
+        return
+    end
+    for _, monster in ipairs(monsters:GetChildren()) do monitorAntiMissclickMonster(monster) end
+    table.insert(AntiMissclickMonsterConnections, monsters.ChildAdded:Connect(monitorAntiMissclickMonster))
+    table.insert(AntiMissclickMonsterConnections, monsters.ChildRemoved:Connect(function(monster)
+        local record = AntiMissclickMonsterRecords[monster]
+        if record then
+            disconnectConnections(record.connections)
+            if record.chasingConnection then record.chasingConnection:Disconnect() end
+            if record.chasingValueConnection then record.chasingValueConnection:Disconnect() end
+            AntiMissclickMonsterRecords[monster] = nil
+            updateAntiMissclickChaseState()
+        end
+    end))
+end
+
 local function clearGeneratorMap()
     autoHideLoopId += 1
     AntiMissclickBeingChased = false
+    AntiMissclickEventChased = false
+    bindAntiMissclickMonsters(nil)
     table.clear(AntiMissclickStoppedGenerators)
     if autoHideActive and autoHideSavedCFrame then
         local character = localplayer.Character
         local root = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("RootPart"))
         if root then
-            if autoHideTween then autoHideTween:Cancel() autoHideTween = nil end
+            if autoHideTween then
+                autoHideTween:Cancel()
+                autoHideTween = nil
+            end
             root.CFrame = autoHideSavedCFrame
             local syncRoot = character:FindFirstChild("RootPart")
             if syncRoot and syncRoot:IsA("BasePart") then syncRoot.CFrame = root.CFrame end
@@ -1297,7 +1573,7 @@ local function clearGeneratorMap()
     GeneratorWatch.map = nil
 end
 
-local function valueDescription(value)
+valueDescription = function(value)
     if value == nil then
         return "nil"
     end
@@ -1317,7 +1593,7 @@ local function valueIsActive(value)
     return true
 end
 
-local function playerNameFromValue(value)
+playerNameFromValue = function(value)
     if typeof(value) == "Instance" and value:IsA("Player") then
         return value.Name
     end
@@ -1376,16 +1652,69 @@ local function isLocalPlayerValue(value)
 end
 
 local function stopGeneratorInteractionIfChased(generator)
-    if not AntiMissclickEnabled or not AntiMissclickBeingChased or not generator or AntiMissclickStoppedGenerators[generator] then return end
+    if not AntiMissclickEnabled or not AntiMissclickBeingChased or not generator or AntiMissclickStoppedGenerators[generator] then return false end
+    if not GeneratorWatch.generatorRecords[generator] then
+        generatorDiagnostic("Anti Missclick: target is not in the active generator monitor | " .. generator:GetFullName())
+        return false
+    end
     local stats = generator:FindFirstChild("Stats")
     local stopInteracting = stats and stats:FindFirstChild("StopInteracting")
     if not stopInteracting or not stopInteracting:IsA("RemoteEvent") then
-        generatorDiagnostic("Anti Missclick: StopInteracting RemoteEvent missing for " .. generator:GetFullName())
-        return
+        generatorDiagnostic("Anti Missclick: Stats.StopInteracting RemoteEvent missing for " .. generator:GetFullName())
+        return false
     end
+
     AntiMissclickStoppedGenerators[generator] = true
-    stopInteracting:FireServer("Stop")
-    print("[Anti Missclick] Stopped generator interaction while chased: " .. generator:GetFullName())
+    print("[Anti Missclick] Chased generator interaction detected; waiting 0.128s before Stop: " .. generator:GetFullName())
+    task.delay(0.128, function()
+        if not AntiMissclickEnabled or not AntiMissclickBeingChased then
+            AntiMissclickStoppedGenerators[generator] = nil
+            print("[Anti Missclick] Stop canceled because LostInterest arrived during sync delay")
+            return
+        end
+        if not generator.Parent or not GeneratorWatch.generatorRecords[generator] then
+            AntiMissclickStoppedGenerators[generator] = nil
+            print("[Anti Missclick] Stop canceled because the generator was removed before sync")
+            return
+        end
+        local currentStats = generator:FindFirstChild("Stats")
+        local activePlayer = currentStats and currentStats:FindFirstChild("ActivePlayer")
+        if not activePlayer or not activePlayer:IsA("ValueBase") or not isLocalPlayerValue(activePlayer.Value) then
+            AntiMissclickStoppedGenerators[generator] = nil
+            print("[Anti Missclick] Stop canceled because this generator is no longer active for the local player")
+            return
+        end
+        local currentStop = currentStats:FindFirstChild("StopInteracting")
+        if not currentStop or not currentStop:IsA("RemoteEvent") then
+            AntiMissclickStoppedGenerators[generator] = nil
+            generatorDiagnostic("Anti Missclick: Stats.StopInteracting disappeared before send | " .. generator:GetFullName())
+            return
+        end
+        currentStop:FireServer("Stop")
+        print("[Anti Missclick] Fired Stats.StopInteracting('Stop') for active generator: " .. generator:GetFullName())
+    end)
+    return true
+end
+
+local function cancelAutoHideForMissclick(generator)
+    if not autoHideActive or workingGenerator ~= generator then return end
+    autoHideLoopId += 1
+    if autoHideTween then
+        autoHideTween:Cancel()
+        autoHideTween = nil
+    end
+    local savedCFrame = autoHideSavedCFrame
+    local root = getCharacterRoot()
+    if savedCFrame and root and autoHidePositionedGenerator == generator then
+        root.CFrame = savedCFrame
+        local syncRoot = localplayer.Character and localplayer.Character:FindFirstChild("RootPart")
+        if syncRoot and syncRoot:IsA("BasePart") then syncRoot.CFrame = savedCFrame end
+    end
+    autoHideSavedCFrame = nil
+    autoHideActive = false
+    autoHideWasSpotted = false
+    autoHidePositionedGenerator = nil
+    print("[AutoHide] Pre-hide canceled because generator interaction was a chased missclick")
 end
 
 local function bindAntiMissclickEvents()
@@ -1394,11 +1723,12 @@ local function bindAntiMissclickEvents()
     local spotted = storyEvents and storyEvents:FindFirstChild("Spotted")
     local lostInterest = storyEvents and storyEvents:FindFirstChild("LostInterest")
     if spotted and spotted:IsA("RemoteEvent") then
-        table.insert(AntiMissclickConnections, spotted.OnClientEvent:Connect(function()
+        table.insert(AntiMissclickConnections, spotted.OnClientEvent:Connect(function(monster)
             if not AntiMissclickEnabled then return end
-            AntiMissclickBeingChased = true
+            AntiMissclickEventChased = true
             table.clear(AntiMissclickStoppedGenerators)
-            print("[Anti Missclick] Spotted received; chase window started")
+            print("[Anti Missclick] StoryEvents.Spotted.OnClientEvent received | source=" .. valueDescription(monster) .. " | chase window started")
+            updateAntiMissclickChaseState()
         end))
     else
         generatorDiagnostic("Anti Missclick: StoryEvents.Spotted RemoteEvent not found")
@@ -1406,9 +1736,10 @@ local function bindAntiMissclickEvents()
     if lostInterest and lostInterest:IsA("RemoteEvent") then
         table.insert(AntiMissclickConnections, lostInterest.OnClientEvent:Connect(function()
             if not AntiMissclickEnabled then return end
+            AntiMissclickEventChased = false
             AntiMissclickBeingChased = false
             table.clear(AntiMissclickStoppedGenerators)
-            print("[Anti Missclick] LostInterest received; chase window ended")
+            print("[Anti Missclick] StoryEvents.LostInterest.OnClientEvent received; chase window ended")
         end))
     else
         generatorDiagnostic("Anti Missclick: StoryEvents.LostInterest RemoteEvent not found")
@@ -1420,12 +1751,19 @@ local function setAntiMissclick(state)
     table.clear(AntiMissclickStoppedGenerators)
     if state then
         AntiMissclickBeingChased = false
+        AntiMissclickEventChased = false
         bindAntiMissclickEvents()
     else
         AntiMissclickBeingChased = false
+        AntiMissclickEventChased = false
         disconnectConnections(AntiMissclickConnections)
     end
     print("[Anti Missclick] Toggle changed | enabled=" .. tostring(state))
+    if state then
+        bindAntiMissclickMonsters(GeneratorWatch.map)
+    else
+        bindAntiMissclickMonsters(nil)
+    end
 end
 
 local function configureGenerator(record)
@@ -1485,8 +1823,12 @@ local function configureGenerator(record)
     nextGeneratorDiagnostic("ActivePlayer attached | generator=" .. record.instance:GetFullName() .. " | class=" .. activePlayer.ClassName .. " | initial=" .. valueDescription(previousValue) .. " | localPlayer=" .. tostring(isLocalPlayerValue(previousValue)))
     if isLocalPlayerValue(previousValue) then
         workingGenerator = record.instance
-        stopGeneratorInteractionIfChased(record.instance)
-        startPreHide(record.instance)
+        local stoppedAsMissclick = stopGeneratorInteractionIfChased(record.instance)
+        if stoppedAsMissclick then
+            cancelAutoHideForMissclick(record.instance)
+        else
+            startPreHide(record.instance)
+        end
         nextGeneratorDiagnostic("WORKING GENERATOR SET FROM INITIAL VALUE | " .. record.instance:GetFullName())
         if updateNextGeneratorState then task.defer(updateNextGeneratorState, record.instance) end
     elseif workingGenerator == record.instance then
@@ -1499,8 +1841,16 @@ local function configureGenerator(record)
         nextGeneratorDiagnostic("ActivePlayer.Value changed | generator=" .. record.instance:GetFullName() .. " | from=" .. valueDescription(previousValue) .. " | to=" .. valueDescription(newValue) .. " | localPlayer=" .. tostring(isLocalPlayerValue(newValue)))
         if isLocalPlayerValue(newValue) then
             workingGenerator = record.instance
-            stopGeneratorInteractionIfChased(record.instance)
-            startPreHide(record.instance)
+            local startedDuringChase = not isLocalPlayerValue(previousValue)
+            local stoppedAsMissclick = startedDuringChase and stopGeneratorInteractionIfChased(record.instance)
+            if startedDuringChase and not stoppedAsMissclick then
+                print("[Anti Missclick] Generator start was not canceled | enabled=" .. tostring(AntiMissclickEnabled) .. " | beingChased=" .. tostring(AntiMissclickBeingChased) .. " | generator=" .. record.instance:GetFullName())
+            end
+            if stoppedAsMissclick then
+                cancelAutoHideForMissclick(record.instance)
+            else
+                startPreHide(record.instance)
+            end
             nextGeneratorDiagnostic("WORKING GENERATOR SET | " .. record.instance:GetFullName())
             if updateNextGeneratorState then task.defer(updateNextGeneratorState, record.instance) end
         elseif isLocalPlayerValue(previousValue) and workingGenerator == record.instance then
@@ -1658,7 +2008,13 @@ local function startGeneratorMapScan(reason, scanId)
 
         clearGeneratorMap()
         GeneratorWatch.map = selected.map
+        if AntiMissclickEnabled then bindAntiMissclickMonsters(selected.map) end
         generatorDiagnostic("Identified new map " .. selected.map.Name .. " after 6 seconds; monitoring " .. selected.generators:GetFullName())
+        table.insert(GeneratorWatch.mapConnections, selected.map.DescendantAdded:Connect(function(descendant)
+            if AntiMissclickEnabled and descendant.Name == "Monsters" and descendant:IsA("Folder") then
+                bindAntiMissclickMonsters(selected.map)
+            end
+        end))
         if VisualWatch and VisualWatch.map ~= selected.map then
             VisualWatch.scanId += 1
             clearVisualMap()
@@ -1741,7 +2097,7 @@ local function bindGeneratorCurrentRoom(folder)
     scheduleGeneratorMapScan("CurrentRoom bound")
 end
 
-local function getCharacterRoot()
+getCharacterRoot = function()
     local character = localplayer.Character
     return character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("RootPart"))
 end
@@ -1956,6 +2312,10 @@ local function onSpotted()
     local root = getCharacterRoot()
     local generator = getPreSpottedGenerator()
     if not root or not generator then return end
+    if AntiMissclickEnabled and AntiMissclickStoppedGenerators[generator] then
+        nextGeneratorDiagnostic("AutoHide: ignored spotted event for generator canceled by Anti Missclick")
+        return
+    end
     local wasPrepositioning = NextGeneratorEnabled and prepositionSourceGenerator == generator and prepositionedGenerator ~= nil
     if not autoHideSavedCFrame then autoHideSavedCFrame = root.CFrame end
     autoHideActive = true
@@ -1998,7 +2358,10 @@ local function setAutoHide(state)
         if autoHideActive and autoHideSavedCFrame then
             local root = getCharacterRoot()
             if root then
-                if autoHideTween then autoHideTween:Cancel() autoHideTween = nil end
+                if autoHideTween then
+                    autoHideTween:Cancel()
+                    autoHideTween = nil
+                end
                 root.CFrame = autoHideSavedCFrame
             end
         end
@@ -2191,6 +2554,7 @@ local function stopGeneratorWatch()
     disconnectConnections(GeneratorWatch.currentRoomConnections)
     setAutoHide(false)
     setAntiMissclick(false)
+    setStatusTagsEnabled(false)
     clearGeneratorMap()
     GeneratorWatch.folder = nil
     NextGeneratorEnabled = false
@@ -2205,28 +2569,11 @@ function gui_death_protocol()
     deathProtocolDone = true
     print("Stoping script...")
     stopGeneratorWatch()
-    if statusTagConnection then
-        statusTagConnection:Disconnect()
-        statusTagConnection = nil
-    end
-
     setAutoQTE(false)
     autoQTEEnabled = false
 
-    fbenabled=false
-    fbloop=false
-    if fullbrightThread then
-        pcall(task.cancel, fullbrightThread)
-        fullbrightThread = nil
-    end
-
-    light.Brightness = bkbright
-    light.GlobalShadows = bkglobalshadow
-    light.ClockTime = bkclocktime
-    --light.ExposureCompensation = bkexposurecomp
-    light.FogEnd = bkfogend
-    light.FogStart = bkfogstart
-    light.OutdoorAmbient = bkoutdooramb
+    fbenabled = false
+    applyFullbright(false)
     print("Disabled Fullbright")
 
     localplayer.CameraMinZoomDistance = originalCameraMinZoomDistance
@@ -2273,30 +2620,41 @@ gui:OnDestroy(
 )
 
 local function buildInterface()
-local Player = gui:Tab({Title = "Player", Icon = "lucide:user-round"})
-local Visual = gui:Tab({Title = "Visuals", Icon = "lucide:scan-eye"})
-local Gameplay = gui:Tab({Title = "Generators", Icon = "lucide:bolt"})
-local Settings = gui:Tab({Title = "Settings", Icon = "lucide:settings-2"})
+local Player = gui:Tab({Title = "Player", Icon = "user-round"})
+local Visual = gui:Tab({Title = "Visuals", Icon = "scan-eye"})
+local Gameplay = gui:Tab({Title = "Generators", Icon = "bolt"})
+local Misc = gui:Tab({Title = "Misc", Icon = "sliders-horizontal"})
+local Settings = gui:Tab({Title = "Settings", Icon = "settings-2"})
 
 Player:Paragraph({
     Title = "Player",
     Desc = "Opções de personagem, movimento e câmera.",
 })
+Player:Space()
 
 Visual:Paragraph({
     Title = "Visuals",
     Desc = "Recursos visuais da sala e preferências de cores.",
 })
+Visual:Space()
 
 Gameplay:Paragraph({
     Title = "Generators",
     Desc = "Assistências relacionadas à partida e aos geradores.",
 })
+Gameplay:Space()
 
 Settings:Paragraph({
     Title = "Settings",
     Desc = "Preferências da interface, personalização e configurações salvas.",
 })
+Settings:Space()
+
+Misc:Paragraph({
+    Title = "Misc",
+    Desc = "Opções leves para ajustar elementos visuais e reduzir trabalho em dispositivos móveis.",
+})
+Misc:Space()
 
 local function applyVisualColors()
     for instance, record in pairs(VisualWatch.records) do
@@ -2336,18 +2694,22 @@ local function getThemeNames()
 end
 
 local function setSpecialItemColor(itemName, color)
-    special_items[itemName] = color
+    if not special_items[itemName] then return end
+    special_items[itemName].color = color
     applySpecialItemColors()
+end
+
+local function setSpecialItemNotify(itemName, enabled)
+    if not special_items[itemName] then return end
+    special_items[itemName].notify = enabled == true
 end
 
 local SpecialItemColorPicker
 
 -- toggles
-
 local ToggleMinZoom = Player:Toggle({
-    Title = "Sem Zoom Mínimo",
-    Desc = "Remove o zoom mínimo e permite usar a primeira pessoa.",
-    Flag = "Camera_MinZoom",
+    Title = "Sem zoom maximo",
+    Icon = "zoom-in",
     Callback = function(state)
         if state then
             localplayer.CameraMinZoomDistance = 0
@@ -2358,9 +2720,8 @@ local ToggleMinZoom = Player:Toggle({
 })
 
 local ToggleMaxZoom = Player:Toggle({
-    Title = "Sem Zoom Máximo",
-    Desc = "Remove o limite de zoom para afastar a câmera.",
-    Flag = "Camera_MaxZoom",
+    Title = "Sem zoom minimo.",
+    Icon = "zoom-out",
     Callback = function(state)
         if state then
             localplayer.CameraMaxZoomDistance = bignumb
@@ -2369,11 +2730,12 @@ local ToggleMaxZoom = Player:Toggle({
         end
     end
 })
+Player:Space()
 
 local Jump = Player:Toggle({
     Title = "Ativar Pulo",
+    Icon = "arrow-up",
     Desc = "Ativa ou desativa o pulo do personagem.",
-    Flag = "Player_Jump",
     Callback = function(state)
         local character = localplayer.Character
         local humanoid = character and character:FindFirstChildWhichIsA("Humanoid")
@@ -2388,23 +2750,21 @@ local Jump = Player:Toggle({
     end
 })
 
-local FB = Player:Toggle({
+local FB = Visual:Toggle({
     Title = "Fullbright",
+    Icon = "sun",
     Desc = "Aumenta a iluminação para melhorar a visibilidade em áreas escuras.",
-    Flag = "Visual_Fullbright",
     Callback = function(state)
-        if state then
-            fbenabled = true
-        else
-            fbenabled = false
-        end
-    end
-}) 
+        fbenabled = state
+        applyFullbright(state)
+    end,
+})
+Visual:Space()
 
 local TpwalkToggle = Player:Toggle({
     Title = "Stamina Infinita",
+    Icon = "zap",
     Desc = "Mantém o recurso de movimento associado à velocidade ativo.",
-    Flag = "Player_InfiniteStamina",
     Callback = function(state)
         if state then
             tpwalkEnabled = true
@@ -2417,7 +2777,6 @@ local TpwalkToggle = Player:Toggle({
 local TpwalkSlider = Player:Slider({
     Title = "Velocidade",
     Desc = "Ajusta a intensidade da assistência de movimento.",
-    Flag = "Player_StaminaSpeed",
     Value = {
         Min = 0.1,
         Max = 5,
@@ -2431,8 +2790,8 @@ local TpwalkSlider = Player:Slider({
 
 local Noclip = Player:Toggle({
     Title = "NoClip",
+    Icon = "ghost",
     Desc = "Desativa a colisão das hitboxes da sala atual.",
-    Flag = "Player_Noclip",
     Callback = function(state)
         noclipenabled = state
         if state then
@@ -2444,20 +2803,20 @@ local Noclip = Player:Toggle({
         end
     end
 })
+Player:Space()
 
 Player:Paragraph({
     Title = "Função descontinuada",
     Desc = "O NoClip Agressivo permanece bloqueado até ser liberado em Settings.",
 })
-Player:Space()
 
 local Noclip_AGR = Player:Toggle({
     Title = "NoClip Agressivo",
+    Icon = "shield",
     Desc = "Move os objetos das hitboxes para o ReplicatedStorage enquanto o noclip está ativo.",
     Type = "Checkbox",
     Value = false,
     Locked = true,
-    Flag = "Player_AggressiveNoclip",
     Callback = function(state)
         noclipagressivemode = state
         if not noclipenabled then return end
@@ -2473,30 +2832,32 @@ local Noclip_AGR = Player:Toggle({
 })
 
 Noclip_AGR:Lock()
-local ESP_Monster = Visual:Toggle({
+
+local ESPGroup = Visual:Group({})
+local ESP_Monster = ESPGroup:Toggle({
     Title = "ESP Twisted",
-    Desc = "Marca monstros presentes na sala atual e acompanha as próximas salas.",
-    Flag = "ESP_Monsters",
+    Icon = "skull",
     Callback = function(state)
         MonsESP = state
         f_monesp(state)
     end
-}) 
+})
 
-local ESP_Generators = Visual:Toggle({
+ESPGroup:Space()
+
+local ESP_Generators = ESPGroup:Toggle({
     Title = "ESP Geradores",
-    Desc = "Marca os geradores da sala atual e atualiza ao trocar de sala.",
-    Flag = "ESP_Generators",
+    Icon = "cpu",
     Callback = function(state)
         GenESP = state
         f_genesp(state)
     end
-}) 
-
+})
+Visual:Space()
 local ESP_Items = Visual:Toggle({
     Title = "ESP Itens",
+    Icon = "package",
     Desc = "Mostra itens com highlight e nome; Bandage e HealthKit geram notificação.",
-    Flag = "ESP_Items",
     Callback = function(state)
         f_itemsesp(state)
     end
@@ -2529,8 +2890,8 @@ local GeneratorColorPicker = Visual:Colorpicker({
 local AutoQTEToggle
 AutoQTEToggle = Gameplay:Toggle({
     Title = "AutoQTE",
+    Icon = "target",
     Desc = "Completa o QTE enquanto ligado e restaura o callback anterior ao desligar.",
-    Flag = "Generators_AutoQTE",
     Callback = function(state)
         setAutoQTE(state)
     end
@@ -2538,26 +2899,62 @@ AutoQTEToggle = Gameplay:Toggle({
 
 local AutoHideToggle = Gameplay:Toggle({
     Title = "AutoHide ao ser visto",
+    Icon = "eye",
     Desc = "Só reage ao Spotted se você estava usando um gerador; sobe acima dele e retorna quando a área ficar livre.",
-    Flag = "Generators_AutoHide",
     Callback = function(state)
         setAutoHide(state)
     end
 })
 
-local AntiMissclickToggle = Gameplay:Toggle({
-    Title = "Anti Missclick",
-    Desc = "Se Spotted chegar antes de LostInterest, cancela uma interação iniciada no gerador durante a perseguição.",
-    Flag = "Generators_AntiMissclick",
-    Callback = function(state)
-        setAntiMissclick(state)
-    end
+
+Misc:Toggle({
+    Title = "Desligar boxes",
+    Icon = "square-x",
+    Desc = "Oculta as caixas do ESP para reduzir elementos desenhados.",
+    Value = false,
+    Flag = "Misc_DisableBoxes",
+    Callback = function(disabled)
+        setESPBoxesEnabled(not disabled)
+    end,
+})
+
+Misc:Dropdown({
+    Title = "Modo de drawing",
+    Desc = "Tudo mostra todos os desenhos; Semi mostra desenhos apenas para itens especiais; Nada desativa os desenhos. Highlights continuam ativos.",
+    Values = {"Tudo", "Semi", "Nada"},
+    Value = "Tudo",
+    Flag = "Misc_DrawingMode",
+    Callback = function(mode)
+        if type(mode) == "string" then setESPDisplayMode(mode) end
+    end,
+})
+Misc:Space()
+Misc:Toggle({
+    Title = "Ocultar FPS",
+    Icon = "gauge",
+    Desc = "Oculta somente a tag de FPS.",
+    Value = false,
+    Flag = "Misc_HideFPS",
+    Callback = function(hidden)
+        setFPSTagVisible(not hidden)
+    end,
+})
+
+Misc:Toggle({
+    Title = "Ocultar timer",
+    Icon = "clock",
+    Desc = "Oculta somente a tag de tempo de sessao.",
+    Value = false,
+    Flag = "Misc_HideTimer",
+    Callback = function(hidden)
+        setPlaytimeTagVisible(not hidden)
+    end,
 })
 
 local NextGeneratorToggle = Gameplay:Toggle({
     Title = "Next Generator",
+    Icon = "arrow-right",
     Desc = "Aos 90% do gerador em uso, prepara o próximo. Se for visto durante a preparação, espera terminar o atual antes de descer no próximo.",
-    Flag = "Generators_NextGenerator",
     Callback = function(state)
         NextGeneratorEnabled = state
         nextGeneratorDiagnostic("Toggle changed | enabled=" .. tostring(state))
@@ -2579,6 +2976,19 @@ local NextGeneratorToggle = Gameplay:Toggle({
         bindNextGenerator()
     end
 })
+Gameplay:Space()
+local AntiMissclickToggle = Gameplay:Toggle({
+    Title = "Anti Missclick",
+    Icon = "ban",
+    Type = "Checkbox",
+    Value = false,
+    Locked = true,
+    Desc = "Descontinuado. Pode conflitar com Next Generator e AutoHide; libere funcoes descontinuadas em Settings para desbloquear.",
+    Callback = function(state)
+        setAntiMissclick(state)
+    end
+})
+AntiMissclickToggle:Lock()
 
 local currentTheme = "Dark"
 pcall(function()
@@ -2600,9 +3010,10 @@ local ThemeDropdown = Settings:Dropdown({
     end,
 })
 
-local specialItemOptions = {"AirHorn", "Bandage", "HealthKit", "Tape", "ResearchCapsule", "Pumpkin"}
+local specialItemOptions = getSpecialItemNames()
 local pendingSpecialItem = specialItemOptions[1]
-local pendingSpecialColor = special_items[pendingSpecialItem]
+local pendingSpecialColor = special_items[pendingSpecialItem] and special_items[pendingSpecialItem].color or colors.white
+local SpecialItemNotifyToggle
 
 Settings:Space()
 
@@ -2615,9 +3026,22 @@ local SpecialItemDropdown = Settings:Dropdown({
     Callback = function(itemName)
         if type(itemName) == "string" and special_items[itemName] then
             pendingSpecialItem = itemName
-            pendingSpecialColor = special_items[itemName]
+            pendingSpecialColor = special_items[itemName].color
             if SpecialItemColorPicker then SpecialItemColorPicker:Set(pendingSpecialColor) end
+            if SpecialItemNotifyToggle then SpecialItemNotifyToggle:Set(special_items[itemName].notify) end
         end
+    end,
+})
+
+SpecialItemNotifyToggle = Settings:Toggle({
+    Title = "Notificar ao encontrar",
+    Icon = "bell",
+    Desc = "Ativa ou desativa a notificacao para o item selecionado.",
+    Type = "Checkbox",
+    Value = special_items[pendingSpecialItem] and special_items[pendingSpecialItem].notify or false,
+    Flag = "Settings_NotifySelectedSpecialItem",
+    Callback = function(enabled)
+        setSpecialItemNotify(pendingSpecialItem, enabled)
     end,
 })
 
@@ -2634,11 +3058,11 @@ SpecialItemColorPicker = Settings:Colorpicker({
 Settings:Button({
     Title = "Aplicar cor ao item",
     Desc = "Salva a cor escolhida para o item selecionado e atualiza o ESP.",
-    Icon = "lucide:paintbrush",
+    Icon = "paintbrush",
     Callback = function()
         if pendingSpecialItem and typeof(pendingSpecialColor) == "Color3" then
             setSpecialItemColor(pendingSpecialItem, pendingSpecialColor)
-            WindUI:Notify({Title = "ESP de itens", Content = "Cor aplicada a " .. pendingSpecialItem .. ".", Icon = "lucide:paintbrush", Duration = 3})
+            WindUI:Notify({Title = "ESP de itens", Content = "Cor aplicada a " .. pendingSpecialItem .. ".", Icon = "paintbrush", Duration = 3})
         end
     end,
 })
@@ -2656,6 +3080,7 @@ if configManager and configManager.Init then
 end
 Settings:Toggle({
     Title = "Transparência da janela",
+    Icon = "panels-top-left",
     Desc = "Alterne o modo transparente da interface.",
     Value = false,
     Flag = "Settings_WindowTransparency",
@@ -2717,8 +3142,17 @@ end
 
 local function serializeSpecialItemColors()
     local serialized = {}
-    for itemName, color in pairs(special_items) do
+    for itemName, itemSettings in pairs(special_items) do
+        local color = itemSettings.color
         serialized[itemName] = string.format("#%02X%02X%02X", math.floor(color.R * 255 + 0.5), math.floor(color.G * 255 + 0.5), math.floor(color.B * 255 + 0.5))
+    end
+    return serialized
+end
+
+local function serializeSpecialItemNotifications()
+    local serialized = {}
+    for itemName, itemSettings in pairs(special_items) do
+        serialized[itemName] = itemSettings.notify == true
     end
     return serialized
 end
@@ -2730,35 +3164,53 @@ local function restoreSpecialItemColors(config)
     for itemName, colorHex in pairs(savedColors) do
         if special_items[itemName] and type(colorHex) == "string" then
             local colorOk, color = pcall(function() return Color3.fromHex(colorHex) end)
-            if colorOk then special_items[itemName] = color end
+            if colorOk then special_items[itemName].color = color end
         end
     end
     applySpecialItemColors()
-    pendingSpecialColor = special_items[pendingSpecialItem]
+    pendingSpecialColor = special_items[pendingSpecialItem] and special_items[pendingSpecialItem].color or colors.white
     if SpecialItemColorPicker then SpecialItemColorPicker:Set(pendingSpecialColor) end
+end
+
+local function restoreSpecialItemNotifications(config)
+    if not config or not config.Get then return end
+    local ok, savedNotifications = pcall(function() return config:Get("SpecialItemNotifications") end)
+    if not ok or type(savedNotifications) ~= "table" then return end
+    for itemName, enabled in pairs(savedNotifications) do
+        if special_items[itemName] and type(enabled) == "boolean" then
+            special_items[itemName].notify = enabled
+        end
+    end
+    if SpecialItemNotifyToggle and special_items[pendingSpecialItem] then
+        SpecialItemNotifyToggle:Set(special_items[pendingSpecialItem].notify)
+    end
 end
 
 Settings:Button({
     Title = "Criar e salvar",
     Desc = "Cria uma configuração nova com os valores atuais.",
-    Icon = "lucide:plus",
+    Icon = "plus",
     Callback = function()
         if table.find(configNames(), ConfigNameInput) then
-            return WindUI:Notify({Title = "Configuração", Content = "Esse nome já existe. Selecione a configuração em Editar para sobrescrevê-la.", Icon = "lucide:circle-alert", Duration = 4})
+            return WindUI:Notify({Title = "Configuração", Content = "Esse nome já existe. Selecione a configuração em Editar para sobrescrevê-la.", Icon = "circle-alert", Duration = 4})
         end
         local config = resolveConfig(ConfigNameInput)
-        if not config then return WindUI:Notify({Title = "Configuração", Content = "Não foi possível criar a configuração.", Icon = "lucide:circle-alert", Duration = 4}) end
+        if not config then return WindUI:Notify({Title = "Configuração", Content = "Não foi possível criar a configuração.", Icon = "circle-alert", Duration = 4}) end
         local ok = pcall(function()
-            if config.Set then config:Set("SpecialItemColors", serializeSpecialItemColors()) end
+            if config.Set then
+                config:Set("SpecialItemColors", serializeSpecialItemColors())
+                config:Set("SpecialItemNotifications", serializeSpecialItemNotifications())
+            end
             config:Save()
         end)
-        WindUI:Notify({Title = "Configuração", Content = ok and ("Configuração '" .. ConfigNameInput .. "' criada.") or "Falha ao criar a configuração.", Icon = ok and "lucide:check" or "lucide:circle-alert", Duration = 4})
+        WindUI:Notify({Title = "Configuração", Content = ok and ("Configuração '" .. ConfigNameInput .. "' criada.") or "Falha ao criar a configuração.", Icon = ok and "check" or "circle-alert", Duration = 4})
         if ok and EditConfigDropdown then
             local updatedNames = configNames()
             EditConfigDropdown:Refresh(updatedNames)
             selectedConfigName = ConfigNameInput
             EditConfigDropdown:Select(ConfigNameInput)
         end
+        return nil
     end,
 })
 
@@ -2780,7 +3232,7 @@ EditConfigDropdown = Settings:Dropdown({
 
 local function selectedConfig()
     if not selectedConfigName then
-        WindUI:Notify({Title = "Configuração", Content = "Selecione uma configuração primeiro.", Icon = "lucide:circle-alert", Duration = 4})
+        WindUI:Notify({Title = "Configuração", Content = "Selecione uma configuração primeiro.", Icon = "circle-alert", Duration = 4})
         return nil
     end
     return resolveConfig(selectedConfigName)
@@ -2789,35 +3241,41 @@ end
 Settings:Button({
     Title = "Carregar",
     Desc = "Aplica as preferências salvas na configuração selecionada.",
-    Icon = "lucide:folder-open",
+    Icon = "folder-open",
     Callback = function()
         local config = selectedConfig()
         if not config then return end
         local ok = pcall(function() config:Load() end)
-        if ok then restoreSpecialItemColors(config) end
-        WindUI:Notify({Title = "Configuração", Content = ok and ("Configuração '" .. selectedConfigName .. "' carregada.") or "Falha ao carregar.", Icon = ok and "lucide:check" or "lucide:circle-alert", Duration = 4})
+        if ok then
+            restoreSpecialItemColors(config)
+            restoreSpecialItemNotifications(config)
+        end
+        WindUI:Notify({Title = "Configuração", Content = ok and ("Configuração '" .. selectedConfigName .. "' carregada.") or "Falha ao carregar.", Icon = ok and "check" or "circle-alert", Duration = 4})
     end,
 })
 
 Settings:Button({
     Title = "Salvar alterações",
     Desc = "Sobrescreve a configuração selecionada com as preferências atuais.",
-    Icon = "lucide:save",
+    Icon = "save",
     Callback = function()
         local config = selectedConfig()
         if not config then return end
         local ok = pcall(function()
-            if config.Set then config:Set("SpecialItemColors", serializeSpecialItemColors()) end
+            if config.Set then
+                config:Set("SpecialItemColors", serializeSpecialItemColors())
+                config:Set("SpecialItemNotifications", serializeSpecialItemNotifications())
+            end
             config:Save()
         end)
-        WindUI:Notify({Title = "Configuração", Content = ok and ("Configuração '" .. selectedConfigName .. "' atualizada.") or "Falha ao salvar.", Icon = ok and "lucide:check" or "lucide:circle-alert", Duration = 4})
+        WindUI:Notify({Title = "Configuração", Content = ok and ("Configuração '" .. selectedConfigName .. "' atualizada.") or "Falha ao salvar.", Icon = ok and "check" or "circle-alert", Duration = 4})
     end,
 })
 
 Settings:Button({
     Title = "Deletar configuração",
     Desc = "Exclui a configuração selecionada.",
-    Icon = "lucide:trash-2",
+    Icon = "trash-2",
     Callback = function()
         local config = selectedConfig()
         if not config then return end
@@ -2833,7 +3291,7 @@ Settings:Button({
                 EditConfigDropdown:Select(selectedConfigName)
             end
         end
-        WindUI:Notify({Title = "Configuração", Content = ok and ("Configuração '" .. deletedName .. "' excluída.") or "Falha ao excluir.", Icon = ok and "lucide:check" or "lucide:circle-alert", Duration = 4})
+        WindUI:Notify({Title = "Configuração", Content = ok and ("Configuração '" .. deletedName .. "' excluída.") or "Falha ao excluir.", Icon = ok and "check" or "circle-alert", Duration = 4})
     end,
 })
 
@@ -2841,7 +3299,8 @@ Settings:Space()
 
 local LegacyFeaturesToggle = Settings:Toggle({
     Title = "Habilitar funções descontinuadas",
-    Desc = "Libera o NoClip Agressivo. Ative esta opção conscientemente; o modo remove hitboxes da sala localmente.",
+    Icon = "flask-conical",
+    Desc = "Libera NoClip Agressivo e Anti Missclick, ambos descontinuados e bloqueados por padrao.",
     Value = false,
     Flag = "Settings_LegacyFeatures",
     Callback = function(enabled)
@@ -2849,9 +3308,13 @@ local LegacyFeaturesToggle = Settings:Toggle({
         if enabled then
             Noclip_AGR:Unlock()
             if Noclip_AGR.Set then Noclip_AGR:Set(false) end
+            AntiMissclickToggle:Unlock()
+            if AntiMissclickToggle.Set then AntiMissclickToggle:Set(false) end
         else
             if Noclip_AGR.Set then Noclip_AGR:Set(false) end
             Noclip_AGR:Lock()
+            if AntiMissclickToggle.Set then AntiMissclickToggle:Set(false) end
+            AntiMissclickToggle:Lock()
         end
     end,
 })
@@ -2859,3 +3322,4 @@ local LegacyFeaturesToggle = Settings:Toggle({
 end
 
 buildInterface()
+-- end
