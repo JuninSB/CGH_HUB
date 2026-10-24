@@ -13,12 +13,14 @@ local colors = {
 }
 --[[ Special items tables with their names and properties (default color and if they notify by default) ]]
 local special_items = {
-    ["AirHorn"] = {colors.yellow, false},
+    ["blue1"] = {colors.yellow, false},
     ["Bandage"] = {colors.yellow, true},
     ["HealthKit"] = {colors.red, true},
     ["Tape"] = {colors.darkBlue, false},
     ["ResearchCapsule"] = {colors.darkBlue, false},
     ["Pumpkin"] = {colors.orange, false},
     ["PopBottle"] = {colors.blue1, false},
+    ["JumperCable"] = {colors.yellow, false},
+    ["Valve"] = {colors.red, true},
 }
 return special_items,colors
